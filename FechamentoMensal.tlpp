@@ -1,0 +1,905 @@
+#INCLUDE 'TLPP-CORE.TH'
+#INCLUDE 'TLPP-REST.TH'
+#INCLUDE "TOTVS.CH"
+
+Static lDbgQry	:= IIF(left(Upper(GetEnvServer()),4)$"TEST",.T.,.F.)
+
+/*/{Protheus.doc} FechamentoMensal
+	@type Function
+	@author Alessandro de Farias - amjgfarias@gmail.com
+	@since 18/08/2022
+	@updated 28/11/2022
+/*/
+
+User Function FechamentoMensal()
+//Local nN   := 0
+Local nY   := 0
+Local aParamBox := {}
+Local aRet      := {}
+Local aEMarcadas:= {}
+Local cTitulo	 := "Fechamento mensal de estoque ("+cValToChar(GetMv("MV_ULMES"))+")"
+Local bOk       := {|| .T.}
+Local aButtons  := {}
+Local lCentered := .T.
+Local lCanSave  := .T.
+Local lUserSave := .T.
+Local cLoad     := "FechamentoMensal"
+Local nPosx     := Nil
+Local nPosy     := Nil
+Local lRet      := .F.
+
+Set Deleted On
+SET(_SET_DELETED, .T.)
+Set Date British
+SET(4,"DD/MM/YY")
+Set Century Off
+
+aAdd(aParamBox,{1,"Data do fechamento",GetMv("MV_ULMES"),"","NaoVazio()","","",50,.T.})
+
+lRet := ParamBox(aParamBox, cTitulo, aRet, bOk, aButtons, lCentered, nPosx, nPosy, /*oMainDlg*/ , cLoad, lCanSave, lUserSave)
+If lRet
+	dDtbase := CTOD(CValToChar(aRet[1]))
+	aEMarcadas := EscEmpresa()
+Else
+	Alert("O Fechamento nao será executado.")
+Endif
+
+For nY := 1 To Len(aEMarcadas)
+	StartJob("u_RnJobFechamentoMensal",GetEnvServer(),.F., { aEMarcadas[nY][01], aEMarcadas[nY][02], dDtbase } )
+	Sleep( 1000 )	// aguarda 1 segundos para que as jobs IPC subam.
+Next nY
+
+Return
+
+
+/*/{Protheus.doc} RnJobFechamentoMensal
+	@type Function
+	@author Alessandro de Farias - amjgfarias@gmail.com
+	@since 18/08/2022
+	@updated 28/11/2022
+/*/
+User Function RnJobFechamentoMensal(uParam)
+Local aContinua
+Local cPBTimeI := Time()
+Local dPBDataI := Date()
+Local lRunJob  := .T.      // - Caso a rotina seja rodada em batch(.T.), sen?o (.F.)
+Local aListaFil:= {"01"}   // - Lista com as filiais a serem consideradas (Batch)
+Local lPartes  := .F.      // - Se considera o custo em partes do processamento
+Local aPerg	   := {}	      // - Parametros para execucao da rotina
+Local nB       := 0
+Local aDados
+Local cBody, cDocSeq
+Local nHdl
+Local dDtbase
+
+Set Deleted On
+SET(_SET_DELETED, .T.)
+Set Date British
+SET(4,"DD/MM/YY")
+Set Century Off
+
+Sleep( 3000 )	// aguarda 3 segundos para que as jobs IPC subam.
+nHdl := fCreate( GetPathSemaforo() + "FechamentoMensal" + uParam[01] + uParam[02] + ".lck" )
+If nHDL < 0
+	Return .F.
+EndIf
+
+RpcClearEnv()
+aContinua := MbRpcEnv(uParam[01],uParam[02]) //MbRpcEnv(cRpcEmp, cRpcFil, cEnvUser, cEnvPass, cEnvMod, cFunName, aTables, lShowFinal, lAbend, lOpenSX, lConnect)
+If ! aContinua[01]
+	ConOut("Erro no MbRpcEnv | " + aContinua[02])
+Endif
+SetModulo("SIGAEST","EST")
+cUserName   := 'Administrador'
+__cUSerID   := '000000'
+__cInterNet := "AUTOMATICO" // forçar o modo automatico.
+
+dDataBase := dDtbase := uParam[03]
+
+aListaFil	:= FWAllFilial(/*cCompany*/,/*cUnitBusiness*/,uParam[01]/*cGrpCompany*/,.F./*lOnlyCode*/)
+
+PutMV("MV_INTACD" ,"0")
+PutMV("MV_A330190","N")
+PutMV("MV_NGMNTES","N")
+PutMV("MV_CUSZERO","S") // https://centraldeatendimento.totvs.com/hc/pt-br/articles/360023788792-MP-SIGAEST-Como-zerar-custo-de-movimento-no-Protheus-
+PutMV("MV_THRSEQ",".F.")
+PutMV("MV_CUSTEXC","N")
+PutMV("MV_M330JCM","1/3/5")
+PutMV("MV_MOEDACM","")
+PutMV("MV_M330THR","30")
+
+DbSelectArea("SB1")
+
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	If !ExisteSX6( "MV_DOCSEQ" )
+		CriarSX6( "MV_DOCSEQ", "C", "Ultimo numero sequencial utilizado para movimentos. Este valor nao deve ser alterado pelos usuarios.", "000000" )
+	EndIf 
+	CheckSeq()
+	cDocSeq := PROXNUM(.T./*lSave*/,.F./*lShowFinal*/) // funcao que VERIFICA o MV_DOCSEQ
+	If GetMV("MV_DOCSEQ") <> cDocSeq
+		PutMV("MV_DOCSEQ",cDocSeq)
+	EndIf
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+RstMVBuff()  //Limpar Cache da Funcao SuperGetMV() - nao retirar
+SuperGetMV() //Limpar Cache da Funcao SuperGetMV() - nao retirar
+
+cPerg := "MTA300"
+Pergunte(cPerg,.F.)
+aVetPerg := { ;
+Replicate(' ',2),;
+Replicate('z',2),;
+Replicate(' ',15),;
+Replicate('z',15),;
+"2","2","1","2"}
+SX1->( dbSetORder(1))
+For nB := 1 to Len(aVetPerg)
+	If SX1->( DbSeek(PadR(cPerg, Len(SX1->X1_GRUPO))+Strzero(nB,2)))
+		Reclock("SX1",.F.)
+		SX1->X1_CNT01 := aVetPerg[nB]
+		if SX1->X1_GSC == "C"
+			SX1->X1_PRESEL := Val(aVetPerg[nB])
+		Endif
+		SX1->( MsUnlock() )
+	EndIf
+Next nB
+aPerg	:= {}
+Pergunte("MTA300", .F. , , , , ,  @aPerg)
+MV_PAR01 := Replicate(' ',2)
+MV_PAR02 := Replicate('z',2)
+MV_PAR03 := Replicate(' ',15)
+MV_PAR04 := Replicate('z',15)
+MV_PAR05 := 2
+MV_PAR06 := 2
+MV_PAR07 := 1
+MV_PAR08 := 2
+SetMVValue("MTA300","MV_PAR01",MV_PAR01)
+SetMVValue("MTA300","MV_PAR02",MV_PAR02)
+SetMVValue("MTA300","MV_PAR03",MV_PAR03)
+SetMVValue("MTA300","MV_PAR04",MV_PAR04)
+SetMVValue("MTA300","MV_PAR05",MV_PAR05)
+SetMVValue("MTA300","MV_PAR06",MV_PAR06)
+SetMVValue("MTA300","MV_PAR07",MV_PAR07)
+SetMVValue("MTA300","MV_PAR08",MV_PAR08)
+__SaveParam("MTA300", aPerg)
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA300(.T.)
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+dDataBase := dDtbase
+aPerg	:= {}
+Pergunte("MTA190", .F. , , , , ,  @aPerg)
+MV_PAR01 := 1                 // Atualiza Preco
+MV_PAR02 := '         '       // De  Nota Fiscal De Entrada
+MV_PAR03 := 'zzzzzzzzz'       // Ate Nota Fiscal de Entrada
+MV_PAR04 := FirstDay(dDataBase)  // De  Data Digitacao da NF
+MV_PAR05 := dDataBase         // Ate Data Digitacao da NF
+MV_PAR06 := 1                 // Atualiza Ult. Data Compra 1 -> Data de Recebimento 2 -> Data de Emissao
+SetMVValue("MTA190","MV_PAR01",MV_PAR01)
+SetMVValue("MTA190","MV_PAR02",MV_PAR02)
+SetMVValue("MTA190","MV_PAR03",MV_PAR03)
+SetMVValue("MTA190","MV_PAR04",MV_PAR04)
+SetMVValue("MTA190","MV_PAR05",MV_PAR05)
+SetMVValue("MTA190","MV_PAR06",MV_PAR06)
+__SaveParam("MTA190", aPerg)
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA190(.T.) // Refaz Custo de Entrada
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+dDataBase := dDtbase
+aPerg	:= {}
+Pergunte("MTA320", .F. , , , , ,  @aPerg)
+MV_PAR01 := 1 // Escolhe a moeda para atualizacao (1=nenhuma)             		?
+MV_PAR02 := 2 // Se deve considerar taxa diaria ou mensal (1/2)           		?
+MV_PAR03 := 3 // Calcula custos por: 1 Standard 2 Estrutura 3 Calcula pelo ultimo custo de NF de compra
+MV_PAR04 := 2 // Se deve ou nao considerar o ultimo preco de compra       		?
+MV_PAR05 := dDataBase // Data final a considerar                                  		|
+MV_PAR06 := '' // Tipo de produto inicial                                  		?
+MV_PAR07 := 'ZZ' // Tipo de produto final                                    		?
+MV_PAR08 := '' // Grupo de produto inicial                                 		?
+MV_PAR09 := 'zzzz' // Grupo de produto final                                   		?
+MV_PAR10 := 2 // Considera Qtd. Neg.?                                     		?
+MV_PAR11 := 2 // Avisar divergencia? (Avisar) (Atualizar) (Nao atualizar) 		|
+MV_PAR12 := 2 // Seleciona Filial? (Sim) (Nao)                            		|
+MV_PAR13 := 1 // Considera Mao de Obra? (Da Estrutura) (Rot. Operacoes) (Ambos)
+MV_PAR14 := 2 // Considera Tipo Dec. OP ?
+MV_PAR15 := 1 // Tempo Setup ? 1-Ignora 2-Som Tempo Total 3-Som Tempo Propo
+MV_PAR16 := '' // Cod do Roteiro de Operacoes ? 
+SetMVValue("MTA320","MV_PAR01",MV_PAR01)
+SetMVValue("MTA320","MV_PAR02",MV_PAR02)
+SetMVValue("MTA320","MV_PAR03",MV_PAR03)
+SetMVValue("MTA320","MV_PAR04",MV_PAR04)
+SetMVValue("MTA320","MV_PAR05",MV_PAR05)
+SetMVValue("MTA320","MV_PAR06",MV_PAR06)
+SetMVValue("MTA320","MV_PAR07",MV_PAR07)
+SetMVValue("MTA320","MV_PAR08",MV_PAR08)
+SetMVValue("MTA320","MV_PAR09",MV_PAR09)
+SetMVValue("MTA320","MV_PAR10",MV_PAR10)
+SetMVValue("MTA320","MV_PAR11",MV_PAR11)
+SetMVValue("MTA320","MV_PAR12",MV_PAR12)
+SetMVValue("MTA320","MV_PAR13",MV_PAR13)
+SetMVValue("MTA320","MV_PAR14",MV_PAR14)
+SetMVValue("MTA320","MV_PAR15",MV_PAR15)
+SetMVValue("MTA320","MV_PAR16",MV_PAR16)
+__SaveParam("MTA320", aPerg)
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA320() // Custo de Reposição
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+dDataBase := dDtbase
+MATA215(.T.) // Refaz Empenhos
+
+NomeSZI	:= "FECHAMENTO_"+Left(DTOS(dDataBase),6)+"_"+RetSqlName("SZI")
+Query := "SELECT * INTO "+NomeSZI+" FROM "+RetSqlName("SZI")+" SZI WHERE D_E_L_E_T_ = ' ' "
+TcSqlExec(Query)
+
+dDataBase := dDtbase
+
+cPerg := "MTA330"
+Pergunte(cPerg,.F.)
+aPerg		:= {}
+aVetPerg := { ;
+DTOS(dDataBase)/*01*/,"2"/*02*/,"2"/*03*/,"1"/*04*/,"0"/*05*/,"2"/*06*/,""/*07*/,"ZZZZZZZZZZZZZZZ"/*08*/,"1"/*09*/,"2"/*10*/,;
+"2"/*11*/,"3"/*12*/,"2"/*13*/,"3"/*14*/,"2"/*15*/,"1"/*16*/,"1"/*17*/,"2"/*18*/,"2"/*19*/,"2"/*20*/,"2"/*21*/ }
+SX1->( dbSetORder(1))
+For nB := 1 to Len(aVetPerg)
+	If SX1->( DbSeek(PadR(cPerg, Len(SX1->X1_GRUPO))+Strzero(nB,2)))
+		If nB == 1 // data
+			aAdd(aPerg,dDataBase)
+		Else
+			aAdd(aPerg,aVetPerg[nB])
+		Endif
+		Reclock("SX1",.F.)
+		SX1->X1_CNT01 := aVetPerg[nB]
+		if SX1->X1_GSC == "C"
+			SX1->X1_PRESEL := aPerg[Len(aPerg)] := Val(aVetPerg[nB])
+		Endif
+		SX1->( MsUnlock() )
+	EndIf
+Next
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA330(lRunJob,{cFilAnt},lPartes,aPerg)
+	dDataBase := dDtbase
+	SB9Updates()
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+cPerg := "MTA280"
+Pergunte(cPerg,.F.)
+aVetPerg := { "2","2","2","2"}
+SX1->( dbSetORder(1))
+For nB := 1 to Len(aVetPerg)
+	If SX1->( DbSeek(PadR(cPerg, Len(SX1->X1_GRUPO))+Strzero(nB,2)))
+		Reclock("SX1",.F.)
+		SX1->X1_CNT01 := aVetPerg[nB]
+		if SX1->X1_GSC == "C"
+			SX1->X1_PRESEL := Val(aVetPerg[nB])
+		Endif
+		SX1->( MsUnlock() )
+	EndIf
+Next nB
+aPerg	:= {}
+Pergunte("MTA280", .F. , , , , ,  @aPerg)
+MV_PAR01 := 2 // Gera copia dos dados
+MV_PAR02 := 2 // Gera Sld Inicial para MOD
+MV_PAR03 := 2 // Seleciona Filial
+MV_PAR04 := 2 // Atualiza saldo atual da MOD
+SetMVValue("MTA280","MV_PAR01",MV_PAR01)
+SetMVValue("MTA280","MV_PAR02",MV_PAR02)
+SetMVValue("MTA280","MV_PAR03",MV_PAR03)
+SetMVValue("MTA280","MV_PAR04",MV_PAR04)
+__SaveParam("MTA280", aPerg)
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA280(.T.,dDataBase)
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+cPerg := "MTA300"
+Pergunte(cPerg,.F.)
+aVetPerg := { ;
+Replicate(' ',2),;
+Replicate('z',2),;
+Replicate(' ',15),;
+Replicate('z',15),;
+"2","2","1","2"}
+SX1->( dbSetORder(1))
+For nB := 1 to Len(aVetPerg)
+	If SX1->( DbSeek(PadR(cPerg, Len(SX1->X1_GRUPO))+Strzero(nB,2)))
+		Reclock("SX1",.F.)
+		SX1->X1_CNT01 := aVetPerg[nB]
+		if SX1->X1_GSC == "C"
+			SX1->X1_PRESEL := Val(aVetPerg[nB])
+		Endif
+		SX1->( MsUnlock() )
+	EndIf
+Next nB
+aPerg	:= {}
+Pergunte("MTA300", .F. , , , , ,  @aPerg)
+MV_PAR01 := Replicate(' ',2)
+MV_PAR02 := Replicate('z',2)
+MV_PAR03 := Replicate(' ',15)
+MV_PAR04 := Replicate('z',15)
+MV_PAR05 := 2
+MV_PAR06 := 2
+MV_PAR07 := 1
+MV_PAR08 := 2
+SetMVValue("MTA300","MV_PAR01",MV_PAR01)
+SetMVValue("MTA300","MV_PAR02",MV_PAR02)
+SetMVValue("MTA300","MV_PAR03",MV_PAR03)
+SetMVValue("MTA300","MV_PAR04",MV_PAR04)
+SetMVValue("MTA300","MV_PAR05",MV_PAR05)
+SetMVValue("MTA300","MV_PAR06",MV_PAR06)
+SetMVValue("MTA300","MV_PAR07",MV_PAR07)
+SetMVValue("MTA300","MV_PAR08",MV_PAR08)
+__SaveParam("MTA300", aPerg)
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	MATA300(.T.)
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+dbSelectArea("SB1")
+
+For nB:=1 To Len(aListaFil)
+	cFilAnt := aListaFil[nB]
+	cNumEmp := cEmpAnt + cFilAnt
+	SM0->(DbSetOrder(1))
+	SM0->(DbSeek(cNumEmp))
+	dDataBase := dDtbase
+	OpenFile()
+	// qualquer rotina sua 
+Next nB
+cFilAnt := "01"
+cNumEmp := cEmpAnt + cFilAnt
+SM0->(DbSetOrder(1))
+SM0->(DbSeek(cNumEmp))
+
+dbSelectArea("SB1")
+
+aDados := {}
+Aadd( aDados, { "Empresa     ", cEmpAnt + " - " + Capital(SM0->M0_NOMECOM) } )
+Aadd( aDados, { "Database    ", dtoc(ddatabase) } )
+Aadd( aDados, { "Processo    ", "Fechamento Mensal de estoque" } )
+Aadd( aDados, { "Duracao     ", DWElapTime(dPBDataI, cPBTimeI, Date(), Time() ) } )
+Aadd( aDados, { "Ambiente    ", Alltrim(Capital(GetEnvServer())) } )
+cBody		:= "" + CHR(13) + CHR(10)
+cBody		+= MontaTabelaHTML(aDados, .f., "100%")
+cBody		+= "" + CHR(13) + CHR(10)
+cBody		+= MontaTabelaHTML(Mata330Parametros(), .f., "100%")
+cBody		+= "" + CHR(13) + CHR(10)
+
+//U_pbMandaEmail("asdfasdf@asdfasdf.com.br","","","Fechamento Mensal de estoque",Nil,cBody,NIL,NIL)
+
+FClose( nHDL )
+FErase( GetPathSemaforo() + "FechamentoMensal" + uParam[01] + uParam[02] + ".lck" )
+RpcClearEnv()
+
+Return
+
+
+/*/{Protheus.doc} Mata330Parametros
+	@type Function
+	@author Alessandro de Farias - amjgfarias@gmail.com
+	@since 18/08/2022
+/*/
+Static Function Mata330Parametros
+Local aNomParSX6 := {}
+Local nLoop
+Local cConteudo
+Local uValue
+Local aConteudo
+aAdd(aNomParSX6,"MV_ULMES")
+aAdd(aNomParSX6,"MV_330ATCM")
+aAdd(aNomParSX6,"MV_A330190")
+aAdd(aNomParSX6,"MV_A330GRV")
+aAdd(aNomParSX6,"MV_AJUSNFC")
+aAdd(aNomParSX6,"MV_CQ")
+aAdd(aNomParSX6,"MV_CUSFIFO")
+aAdd(aNomParSX6,"MV_CUSFIL" )
+aAdd(aNomParSX6,"MV_CUSLIFO")
+aAdd(aNomParSX6,"MV_CUSMED")
+aAdd(aNomParSX6,"MV_CUSREP")
+aAdd(aNomParSX6,"MV_CUSTEXC")
+aAdd(aNomParSX6,"MV_CUSZERO")
+aAdd(aNomParSX6,"MV_D3SERVI")
+aAdd(aNomParSX6,"MV_DEPTRAN")
+aAdd(aNomParSX6,"MV_GERIMPV")
+aAdd(aNomParSX6,"MV_I330FSM")
+aAdd(aNomParSX6,"MV_LOCALIZ")
+aAdd(aNomParSX6,"MV_LOCPROC")
+aAdd(aNomParSX6,"MV_M330CON")
+aAdd(aNomParSX6,"MV_M330JCM")
+aAdd(aNomParSX6,"MV_M330PR1")
+aAdd(aNomParSX6,"MV_M330TCF")
+aAdd(aNomParSX6,"MV_M330THR")
+aAdd(aNomParSX6,"MV_MOEDACM")
+aAdd(aNomParSX6,"MV_NEGESTR")
+aAdd(aNomParSX6,"MV_NGMNTCM")
+aAdd(aNomParSX6,"MV_NGMNTES")
+aAdd(aNomParSX6,"MV_NGMNTPC")
+aAdd(aNomParSX6,"MV_NIVALT")
+aAdd(aNomParSX6,"MV_PCOINTE")
+aAdd(aNomParSX6,"MV_PROCCV3")
+aAdd(aNomParSX6,"MV_PROCQE6")
+aAdd(aNomParSX6,"MV_PRODMNT")
+aAdd(aNomParSX6,"MV_PRODMOD")
+aAdd(aNomParSX6,"MV_PRODPR0")
+aAdd(aNomParSX6,"MV_PROPCP")
+aAdd(aNomParSX6,"MV_RASTRO")
+aAdd(aNomParSX6,"MV_REMINT")
+aAdd(aNomParSX6,"MV_REQAUT")
+aAdd(aNomParSX6,"MV_SEQ300")
+aAdd(aNomParSX6,"MV_SEQ500")
+aAdd(aNomParSX6,"MV_SEQREBE")
+aAdd(aNomParSX6,"MV_THRSEQ")
+aAdd(aNomParSX6,"MV_UPC2ATU")
+aAdd(aNomParSX6,"MV_WMSNEW")
+cConteudo := ""
+aConteudo := {}
+For nLoop := 1 to len(aNomParSX6)
+	If aNomParSX6[nLoop] $ "MV_UPC2ATU|MV_SEQREBE"
+		uValue := GetMV(aNomParSX6[nLoop],.F.,.F.)
+	Else
+		uValue := GetMV(aNomParSX6[nLoop],.F.)
+	EndIf
+	cConteudo += Padr(aNomParSX6[nLoop],10)+": "
+	cConteudo += Alltrim(cValToChar(uValue))
+	cConteudo += Left(Alltrim(SX6->X6_DESCRIC)+" "+Alltrim(SX6->X6_DESC1)+" "+Alltrim(SX6->X6_DESC2),160)+CHR(13) //CRLF
+	aAdd(aConteudo,{Padr(aNomParSX6[nLoop],10),Alltrim(cValToChar(uValue)),Left(Alltrim(SX6->X6_DESCRIC)+" "+Alltrim(SX6->X6_DESC1)+" "+Alltrim(SX6->X6_DESC2),160)})
+Next nLoop
+aSize(aNomParSX6,0)
+FwFreeArray(aNomParSX6)
+Return aConteudo
+
+
+Static Function OpenFile
+Local nzxc
+Local aRot1Alias := { "SA1","SA2","SE1","SE2","SE5","CT2","CT1","CTO","CTG","CTP","CT5","SD1","SD2","SD3","SF1","SF2","SF3" }
+Local cRotAlias
+
+For nzxc:=1 To Len(aRot1Alias)
+	cRotAlias := aRot1Alias[nzxc]
+	If Select(cRotAlias) > 0
+		(cRotAlias)->(DbCloseArea())
+	Endif
+	ChkFile(cRotAlias)
+Next nzxc
+
+If Select("__SE1") > 0
+	__SE1->(DbCloseArea())
+Endif
+If Select("__SE2") > 0
+	__SE2->(DbCloseArea())
+Endif
+If Select("__SE5") > 0
+	__SE5->(DbCloseArea())
+Endif
+If Select("__SEF") > 0
+	__SEF->(DbCloseArea())
+Endif
+If Select("TRBSE1") > 0
+	TRBSE1->(DbCloseArea())
+Endif
+If Select("TRBSE2") > 0
+	TRBSE2->(DbCloseArea())
+Endif
+If Select("TRBSE5") > 0
+	TRBSE5->(DbCloseArea())
+Endif
+If Select("TRBSEF") > 0
+	TRBSEF->(DbCloseArea())
+Endif
+
+Return
+
+
+Static Function SB9Updates
+Local Query := ""
+
+Query := ""
+Query += "UPDATE SB9 SET B9_VINI1 = 0 " + CRLF
+Query += "FROM " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = ' ' " + CRLF
+Query += "AND SB9.B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND SB9.B9_QINI > 0 AND SB9.B9_VINI1 < 0 " + CRLF
+Query += "AND B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+// AJUSTAR CUSTO STANDART ZERADOS
+Query := ""
+Query += "UPDATE SB1 SET B1_CUSTD = ROUND(CONVERT(MONEY,B1_UPRC),2) " + CRLF
+Query += "FROM " + RetSqlName('SB1') + " SB1 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB1.D_E_L_E_T_ = ' ' " + CRLF
+Query += "AND B1_CUSTD = 0 AND B1_UPRC > 0 " + CRLF
+Query += "AND B1_COD BETWEEN '0001' AND '9999' " + CRLF
+Query += "AND B1_UCOM >= '20170101' " + CRLF
+Query += "AND B1_FILIAL = '"+FwxFilial("SB1")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+// AJUSTAR ULTIMO PRECO DE COMPRA DOS ZERADOS
+Query := ""
+Query += "UPDATE SB1 SET B1_UPRC = ROUND(CONVERT(MONEY,B1_CUSTD),2) " + CRLF
+Query += "FROM " + RetSqlName('SB1') + " SB1 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB1.D_E_L_E_T_ = ' ' " + CRLF
+Query += "AND B1_CUSTD > 0 AND B1_UPRC = 0 " + CRLF
+Query += "AND B1_COD BETWEEN '0001' AND '9999' " + CRLF
+Query += "AND B1_FILIAL = '"+FwxFilial("SB1")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+// AJUSTAR O CUSTD DO B9 COM BASE DO B1
+Query := ""
+Query += "UPDATE SB9 SET B9_CUSTD = ( CASE WHEN ROUND(CONVERT(MONEY,B1_CUSTD),2) <= ROUND(CONVERT(MONEY,B1_UPRC),2) THEN ROUND(CONVERT(MONEY,B1_UPRC),2) ELSE ROUND(CONVERT(MONEY,B1_CUSTD),2) END ) " + CRLF
+Query += "FROM       " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "INNER JOIN " + RetSqlName('SB1') + " SB1 ON (SB1.D_E_L_E_T_ = ' ' AND B1_FILIAL = '"+FwxFilial("SB1")+"'  AND B1_COD = SB9.B9_COD ) " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = ' ' " + CRLF
+Query += "AND SB9.B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND SB9.B9_QINI > 0 AND SB9.B9_VINI1 <= 0 AND SB9.B9_CUSTD = 0 " + CRLF
+Query += "AND SB1.B1_CUSTD > 0 " + CRLF
+Query += "AND SB9.B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+// AJUSTAR B9_CUSTD ZERADO
+Query := ""
+Query += "UPDATE SB9 SET B9_CUSTD = ( CASE WHEN ROUND(CONVERT(MONEY,B1_CUSTD),2) <= ROUND(CONVERT(MONEY,B1_UPRC),2) THEN ROUND(CONVERT(MONEY,B1_UPRC),2) ELSE ROUND(CONVERT(MONEY,B1_CUSTD),2) END ) " + CRLF
+Query += "FROM       " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "INNER JOIN " + RetSqlName('SB1') + " SB1 ON (SB1.D_E_L_E_T_ = ' ' AND B1_FILIAL = '"+FwxFilial("SB1")+"' AND B1_COD = SB9.B9_COD ) " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = ' ' " + CRLF
+Query += "AND SB9.B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND SB9.B9_QINI > 0 AND SB9.B9_VINI1 <= 0  " + CRLF
+Query += "AND SB9.B9_CUSTD = 0 " + CRLF
+Query += "AND SB1.B1_UPRC > 0 " + CRLF
+Query += "AND SB9.B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+Query := ""
+Query += "UPDATE SB9 SET B9_CM1 = ROUND(CONVERT(MONEY,B9_CUSTD),2), B9_VINI1 = ROUND(CONVERT(MONEY,B9_CUSTD),2) * B9_QINI " + CRLF
+Query += "FROM " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = '' " + CRLF
+Query += "AND SB9.B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND SB9.B9_QINI > 0 AND SB9.B9_VINI1 <= 0 " + CRLF
+Query += "AND B9_CUSTD > 0 AND B9_CM1 <= 0 " + CRLF
+Query += "AND B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+Query := ""
+Query += "UPDATE SB9 SET B9_VINI1 = 0 " + CRLF
+Query += "FROM " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = '' " + CRLF
+Query += "AND B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND B9_VINI1 <> 0 AND B9_QINI = 0 " + CRLF
+Query += "AND B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+Query := ""
+Query += "UPDATE SB9 SET B9_VINI1 = 0, B9_CM1 = 0, B9_CUSTD = 0 " + CRLF
+Query += "FROM " + RetSqlName('SB9') + " SB9 " + CRLF
+Query += "WHERE 1=1 " + CRLF
+Query += "AND SB9.D_E_L_E_T_ = '' " + CRLF
+Query += "AND B9_DATA = '"+DTOS(dDataBase)+"' " + CRLF
+Query += "AND B9_QINI < 0 " + CRLF
+Query += "AND B9_FILIAL = '"+FwxFilial("SB9")+"' "
+TcSqlExec(Query)
+If lDbgQry
+   ConOut(Query)
+Endif
+
+Return
+
+
+Static Function EscEmpresa()
+Local   aSalvAmb := GetArea()
+Local   aSalvSM0 := {}
+Local   aRet     := {}
+Local   aVetor   := {}
+Local   oDlg     := NIL
+Local   oChkMar  := NIL
+Local   oLbx     := NIL
+Local   oMascEmp := NIL
+Local   oButMarc := NIL
+Local   oButDMar := NIL
+Local   oButInv  := NIL
+Local   oSay     := NIL
+Local   oOk      := LoadBitmap( GetResources(), "LBOK" )
+Local   oNo      := LoadBitmap( GetResources(), "LBNO" )
+Local   lChk     := .F.
+Local   lTeveMarc:= .F.
+Local   cVar     := ""
+Local   cMascEmp := "??"
+Local   cMascFil := "??"
+Local   aMarcadas  := {}
+
+dbSelectArea( "SM0" )
+aSalvSM0 := SM0->( GetArea() )
+dbSetOrder( 1 )
+dbGoTop()
+While ! SM0->( EOF() )
+	If aScan( aVetor, {|x| x[2] == SM0->M0_CODIGO} ) == 0
+		aAdd(  aVetor, { aScan( aMarcadas, {|x| x[1] == SM0->M0_CODIGO .and. x[2] == SM0->M0_CODFIL} ) > 0, SM0->M0_CODIGO, SM0->M0_CODFIL, SM0->M0_NOME, SM0->M0_FILIAL } )
+	EndIf
+	dbSkip()
+End
+RestArea( aSalvSM0 )
+
+Define MSDialog  oDlg Title "" From 0, 0 To 270, 396 Pixel
+
+oDlg:cToolTip := "Tela para Múltiplas Seleções de Empresas/Filiais"
+oDlg:cTitle   := "Selecione a(s) Empresa(s) para Atualização"
+
+@ 10, 10 Listbox  oLbx Var  cVar Fields Header " ", " ", "Empresa" Size 178, 095 Of oDlg Pixel
+oLbx:SetArray(  aVetor )
+oLbx:bLine := {|| {IIf( aVetor[oLbx:nAt, 1], oOk, oNo ), ;
+aVetor[oLbx:nAt, 2], ;
+aVetor[oLbx:nAt, 4]}}
+oLbx:BlDblClick := { || aVetor[oLbx:nAt, 1] := !aVetor[oLbx:nAt, 1], VerTodos( aVetor, @lChk, oChkMar ), oChkMar:Refresh(), oLbx:Refresh()}
+oLbx:cToolTip   :=  oDlg:cTitle
+oLbx:lHScroll   := .F. // NoScroll
+
+@ 112, 10 CheckBox oChkMar Var  lChk Prompt "Todos"   Message  Size 40, 007 Pixel Of oDlg;
+on Click MarcaTodos( lChk, @aVetor, oLbx )
+
+@ 123, 10 Button oButInv Prompt "&Inverter"  Size 32, 12 Pixel Action ( InvSelecao( @aVetor, oLbx ), VerTodos( aVetor, @lChk, oChkMar ) ) Message "Inverter Seleção" Of oDlg
+
+// Marca/Desmarca por mascara
+@ 113, 51 Say  oSay Prompt "Empresa" Size  40, 08 Of oDlg Pixel
+@ 112, 80 MSGet  oMascEmp Var  cMascEmp Size  05, 05 Pixel Picture "@!"  Valid (  cMascEmp := StrTran( cMascEmp, " ", "?" ), cMascFil := StrTran( cMascFil, " ", "?" ), oMascEmp:Refresh(), .T. ) ;
+Message "Máscara Empresa ( ?? )"  Of oDlg
+@ 123, 50 Button oButMarc Prompt "&Marcar"    Size 32, 12 Pixel Action ( MarcaMas( oLbx, aVetor, cMascEmp, .T. ), VerTodos( aVetor, @lChk, oChkMar ) ) ;
+Message "Marcar usando máscara ( ?? )"    Of oDlg
+@ 123, 80 Button oButDMar Prompt "&Desmarcar" Size 32, 12 Pixel Action ( MarcaMas( oLbx, aVetor, cMascEmp, .F. ), VerTodos( aVetor, @lChk, oChkMar ) ) ;
+Message "Desmarcar usando máscara ( ?? )" Of oDlg
+
+Define SButton From 111, 125 Type 1 Action ( RetSelecao( @aRet, aVetor ), oDlg:End() ) OnStop "Confirma a Seleção"  Enable Of oDlg
+Define SButton From 111, 158 Type 2 Action ( IIf( lTeveMarc, aRet :=  aMarcadas, .T. ), oDlg:End() ) OnStop "Abandona a Seleção" Enable Of oDlg
+Activate MSDialog  oDlg Center
+
+RestArea( aSalvAmb )
+dbSelectArea( "SM0" )
+
+Return  aRet
+
+
+Static Function MarcaTodos( lMarca, aVetor, oLbx )
+Local  nI := 0
+For nI := 1 To Len( aVetor )
+	aVetor[nI][1] := lMarca
+Next nI
+oLbx:Refresh()
+Return NIL
+
+
+Static Function InvSelecao( aVetor, oLbx )
+Local  nI := 0
+For nI := 1 To Len( aVetor )
+	aVetor[nI][1] := !aVetor[nI][1]
+Next nI
+oLbx:Refresh()
+Return NIL
+
+
+Static Function RetSelecao( aRet, aVetor )
+Local  nI    := 0
+aRet := {}
+For nI := 1 To Len( aVetor )
+	If aVetor[nI][1]
+		aAdd( aRet, { aVetor[nI][2] , aVetor[nI][3], aVetor[nI][2] +  aVetor[nI][3] } )
+	EndIf
+Next nI
+Return NIL
+
+
+Static Function MarcaMas( oLbx, aVetor, cMascEmp, lMarDes )
+Local cPos1 := SubStr( cMascEmp, 1, 1 )
+Local cPos2 := SubStr( cMascEmp, 2, 1 )
+Local nPos  := oLbx:nAt
+Local nZ    := 0
+For nZ := 1 To Len( aVetor )
+	If cPos1 == "?" .or. SubStr( aVetor[nZ][2], 1, 1 ) == cPos1
+		If cPos2 == "?" .or. SubStr( aVetor[nZ][2], 2, 1 ) == cPos2
+			aVetor[nZ][1] := lMarDes
+		EndIf
+	EndIf
+Next
+oLbx:nAt := nPos
+oLbx:Refresh()
+Return NIL
+
+
+Static Function VerTodos( aVetor, lChk, oChkMar )
+Local lTTrue := .T.
+Local nI     := 0
+For nI := 1 To Len( aVetor )
+	lTTrue := IIf( !aVetor[nI][1], .F., lTTrue )
+Next nI
+lChk := IIf( lTTrue, .T., .F. )
+oChkMar:Refresh()
+Return NIL
+
+/*/{Protheus.doc} MbRpcEnv
+	@type Function
+	@author Mauricio de Barros Silva - mbarsil@gmail.com
+/*/
+// em virtude de diveros erros na inicializacao de ambientes nos jobs se fez necessario a criacao desta funcao.
+Static Function MbRpcEnv(cRpcEmp, cRpcFil, cEnvUser, cEnvPass, cEnvMod, cFunName, aTables, lShowFinal, lAbend, lOpenSX, lConnect)
+Local lRet       := .F.
+Local nMaxTentat := 30
+Local nTentativa := 1
+Local cErro      := ""
+Local bError     := NIL
+
+Default lOpenSX := .T.
+
+bError := ErrorBlock({|e| cErro := e:Description + "<->" + e:ErrorStack, BREAK(e)})
+
+Do While nTentativa <= nMaxTentat
+	BEGIN SEQUENCE
+		If ! RpcSetEnv(cRpcEmp, cRpcFil, cEnvUser, cEnvPass, cEnvMod, cFunName, aTables, lShowFinal, lAbend, lOpenSX, lConnect)
+			nTentativa++
+			Sleep(6000)
+		EndIf
+	RECOVER  // Tratamento para não abortar o JOB quando der erro
+		ConOut("Erro no rpcsetenv ThreadId: "+ cValToChar(ThreadId()) + " | " + cErro + " | Tentativa: " + cValToChar(nTentativa) )
+		If lOpenSX .And. "MSFINAL" $ Upper(cErro) .And. "ARQUIVO SX2" $ Upper(cErro)
+			nTentativa := 30
+		Endif
+		nTentativa++
+		Sleep(6000)
+	END SEQUENCE
+	If TCIsConnected() .And. Select("SM0") > 0
+		If lOpenSX .And. Select("SX2") > 0
+			lRet := .T.
+		Endif
+		Exit
+	EndIf
+EndDo
+
+Return {lRet, cErro}
+
+
+/*/{Protheus.doc} CheckSeq
+	@type Function
+	@author Alessandro de Farias - amjgfarias@gmail.com
+	@since 18/08/2022
+/*/
+Static Function CheckSeq()
+Local cNext
+Local cNum,cGreat := Space(Len(Criavar("D1_NUMSEQ")))
+Local cAlias := Alias()
+
+dbSelectArea("SD1")
+dbSetOrder(4)
+dbSeek(xFilial("SD1")+"zzzzzz",.T.)
+dbSkip(-1)
+If D1_FILIAL == xFilial("SD1")
+	cNum := D1_NUMSEQ
+Else
+	cNum := Space(Len(D1_NUMSEQ))
+EndIf
+If cNum > cGreat
+	cGreat := cNum
+EndIf
+
+dbSelectArea("SD2")
+dbSetOrder(4)
+dbSeek(xFilial("SD2")+"zzzzzz",.T.)
+dbSkip(-1)
+If D2_FILIAL == xFilial("SD2")
+	cNum := D2_NUMSEQ
+Else
+	cNum := Space(Len(D2_NUMSEQ))
+EndIf
+If cNum > cGreat
+	cGreat := cNum
+EndIf
+
+dbSelectArea("SD3")
+dbSetOrder(4)
+dbSeek(xFilial("SD3")+"zzzzzz",.T.)
+dbSkip(-1)
+If D3_FILIAL == xFilial("SD3")
+	cNum := D3_NUMSEQ
+Else
+	cNum := Space(Len(D3_NUMSEQ))
+EndIf
+If cNum > cGreat
+	cGreat := cNum
+EndIf
+
+cNext := ProxNum(.T./*lSave*/,.F./*lShowFinal*/)
+
+If cGreat >= cNext
+	GetMV("MV_DOCSEQ")
+	PutMV("MV_DOCSEQ",cGreat)
+EndIf
+
+If ! Empty(cAlias)
+	dbSelectArea(cAlias)
+EndIf
+
+Return
