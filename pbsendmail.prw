@@ -1,6 +1,8 @@
 #INCLUDE "TOTVS.CH"
 
 //** Criado por: Alessandro de Farias - amjgfarias@gmail.com - Em: 17/06/2018
+// usar a funcao "pbsendmail" nas rotinas para envio de email.
+
 User Function pbsendmail(cPara,cCopia,cConhCopia,cAssunto,_cDe,cTexto,lHtml,cFile,lConfMaiRead,aPWD,lJob)
 Return StartJob("U_JobMail", GetEnvServer(),.F., { cEmpAnt,cFilAnt,__cUserID,cPara,cCopia,cConhCopia,cAssunto,_cDe,cTexto,lHtml,cFile,lConfMaiRead,aPWD,lJob } )
 
@@ -65,7 +67,7 @@ oMailServer:SetUseTLS(lTLS)
 
 // Inicializacao do objeto de Email
 If nError == 0
-	//Prioriza se a porta está no endereço
+	//Prioriza se a porta estÃ¡ no endereÃ§o
 	nPortAddSrv := AT(":",cSMTPAddr)
 	If nPortAddSrv > 0
 		nSMTPPort := Val(Substr(cSMTPAddr, nPortAddSrv + 1,Len(cSMTPAddr)))
